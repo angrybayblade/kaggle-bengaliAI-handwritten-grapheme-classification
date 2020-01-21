@@ -1,5 +1,9 @@
 from warnings import filterwarnings
 from tqdm import tqdm
+import logging
+import os
+
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
 
 try:
     from notifyme import notify
@@ -28,9 +32,12 @@ PATH = os.getcwd()
 CROP = True if "--crop" in sys.argv else False
 RESIZE = True if "--resize" in sys.argv else False
 SHAPE = (137,236)
+TRAIN_SHAPE = (-1,137,236,1)
 
 OPTIMIZER = sys.argv[sys.argv.index("-opt")+1] if "-opt" in sys.argv else "adam"
 ARCHITECTURE = sys.argv[sys.argv.index("-arch")+1] if "-arch" in sys.argv else "vgg16"
+
+
 
 class LabelEncoder():
     def __init__(self,):
@@ -79,32 +86,54 @@ def create_vgg16(input_shape,output_shape):
 
     return model
 
-def save_score(model,x,y):
-    y_pred = model.predict_classes(x)
-    json.dump(open("./score.json","w+"),dict(
+def save_score(y,y_pred):
+    scores = dict(
         accuracy = accuracy_score(y,y_pred),
         precision = precision_score(y,y_pred),
         recall = recall_score(y,y_pred),
-    ))
+    )
+    print (scores)
+    json.dump(open("./score.json","w+"),scores)
 
-images = pd.read_parquet("./train/train_image_data_0.parquet")
+def load_data(file_id):
+    images = pd.read_parquet(f"./train/train_image_data_{file_id}.parquet")
+    _labels = labels.loc[images.pop("image_id")]['grapheme_root']
+
+    return images,_labels    
+
 labels = pd.read_csv("./train.csv")
 labels.index = labels.image_id
-labels =  labels.loc[images.pop("image_id")]
-images = images.values.reshape(-1,137,236,1)
-output_shape = labels.grapheme.nunique()
-grapheme_le = LabelEncoder()
-grapheme_le.fit(labels.grapheme)
-labels = grapheme_le.transform(labels.grapheme)
-X,x,Y,y = train_test_split(images,labels)
 
-del images,labels
+le_grapheme_root = LabelEncoder()
+le_grapheme_root.fit(labels.grapheme_root)
+labels['grapheme_root'] = le_grapheme_root.transform(labels.grapheme_root)
 
-model = create_vgg16(input_shape=X.shape[1:],output_shape=output_shape)
+
+
+EPOCHS = 20
+BATCH_SIZE = 5
+
+model = create_vgg16(input_shape=(137,236,1),output_shape=len(list(set(labels.grapheme_root))))
 model.compile(optimizer=OPTIMIZER,loss="sparse_categorical_crossentropy",metrics=["accuracy"])
-model.fit(X,Y,epochs=10)
-model.evaluate(x,y)
 
-save_score(model,x,y)
+for epoch in range(EPOCHS):
+    for file_id in range(4):
+        X,Y = load_data(file_id)
+        for index in tqdm(range(BATCH_SIZE,X.shape[0],BATCH_SIZE)):
+            X_ = X[index - BATCH_SIZE:index].values.reshape(TRAIN_SHAPE)
+            Y_ = Y[index - BATCH_SIZE:index]
+            model.fit(X_,Y_,batch_size=BATCH_SIZE,verbose=False)
+
+        X_ = X[index:]
+        Y_ = Y[index:]
+        model.fit(X_,Y_)
+
+# model.evaluate(x,y)
+# save_score(model,x,y)
 
 notify.success()
+
+for i in globals():
+    del globals()[i]
+
+exit()
