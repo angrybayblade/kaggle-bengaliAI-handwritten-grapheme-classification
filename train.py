@@ -15,24 +15,27 @@ filterwarnings("ignore")
 import sys
 import os
 
-import pandas as pd 
-import numpy as np 
+import pandas as pd
+import numpy as np
 import cv2 as cv
-import json
-
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import recall_score,precision_score,accuracy_score
 
 from tensorflow.keras import Sequential
-from tensorflow.keras.layers import Dense,Dropout,Conv2D,MaxPool2D,Flatten
+from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OneHotEncoder
+
+from tqdm import tqdm_notebook
+from notifyme import notify
 
 
 PATH = os.getcwd()
 CROP = True if "--crop" in sys.argv else False
 RESIZE = True if "--resize" in sys.argv else False
+
 SHAPE = (137,236)
-TRAIN_SHAPE = (-1,137,236,1)
+SHAPE_NEW = 48
 
 class LabelEncoder():
     def __init__(self,):
@@ -44,41 +47,6 @@ class LabelEncoder():
     def transform(self,labels):
         return np.fromiter(map(self._classes.index,labels),dtype=np.int)
 
-def create_model(input_shape):
-    model = Sequential()
-
-    ### Block 1
-    model.add(Conv2D(input_shape=input_shape,filters=64,kernel_size=(3,3),padding="same", activation="relu"))
-    model.add(Conv2D(filters=64,kernel_size=(3,3),padding="same", activation="relu"))
-    model.add(MaxPool2D(pool_size=(2,2),strides=(2,2)))
-    model.add(Conv2D(filters=128, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(Conv2D(filters=128, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(MaxPool2D(pool_size=(2,2),strides=(2,2)))
-    
-    ## Block 2
-    model.add(Conv2D(filters=256, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(Conv2D(filters=256, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(Conv2D(filters=256, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(MaxPool2D(pool_size=(2,2),strides=(2,2)))
-    
-    ## Block 3
-    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(MaxPool2D(pool_size=(2,2),strides=(2,2)))
-    
-    ## Block 4
-    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(Conv2D(filters=512, kernel_size=(3,3), padding="same", activation="relu"))
-    model.add(MaxPool2D(pool_size=(2,2),strides=(2,2)))
-    
-    ## Prediction Block
-    model.add(Flatten())
-    model.add(Dense(units=4096,activation="relu"))
-    model.add(Dense(units=4096,activation="relu"))
-    return model
-
 def save_score(y,y_pred):
     scores = dict(
         accuracy = accuracy_score(y,y_pred),
@@ -89,30 +57,104 @@ def save_score(y,y_pred):
     json.dump(open("./score.json","w+"),scores)
 
 
-train_df = pd.read_csv("./train.csv")
-train_df.index = train_df.image_id.values
-train_grapheme = pd.get_dummies(train_df['grapheme_root'])
 
-EPOCHS = 20
-BATCH_SIZE = 5
+def crop(img,pad=True):
+    W_THRESH = 8
+    H_THRESH = 8
+    PAD = 3 if pad else 0
 
-model = create_model(input_shape=(137,236,1))
-model.add(Dense(units=168, activation="softmax"))
+    W_MIN,W_MAX = np.where(img.std(axis=0) > W_THRESH)[0][[0,-1]]
+    H_MIN,H_MAX = np.where(img.std(axis=1) > H_THRESH)[0][[0,-1]]
+    
+    return np.pad(img[H_MIN:H_MAX,W_MIN:W_MAX],PAD,constant_values=253)
+
+def resize(img,shape_=SHAPE_NEW,crop_=True,inv_=True):
+    
+    if crop_:
+        img = crop(img.reshape(SHAPE).astype(np.uint8))
+    if inv_:
+        ret,img = cv.threshold(img,110,255,cv.THRESH_BINARY_INV)
+        
+    return cv.resize(img,(shape_,shape_)).astype(np.uint8)
+
+def input_flow(X,sharpen=1):
+    for i in range(X.shape[0]):
+        row = X.iloc[i].values
+        yield ({
+                'input':resize(row[1:-4]).reshape(1,SHAPE_NEW,SHAPE_NEW,1)/255
+            },
+            {
+                'grapheme_root':grapheme_root_ohe.transform([row[-4:-3]]),
+                'vowel_diacritic':vowel_diacritic_ohe.transform([row[-3:-2]]),
+                'consonant_diacritic':consonant_diacritic_ohe.transform([row[-2:-1]])
+            }
+        )
+
+inputs = Input(shape = (SHAPE_NEW, SHAPE_NEW, 1),name="input")
+model = Conv2D(filters=32, kernel_size=(4, 4), padding='SAME', activation='relu', input_shape=(SHAPE_NEW, SHAPE_NEW, 1))(inputs)
+model = Conv2D(filters=32, kernel_size=(4, 4), padding='SAME', activation='relu')(model)
+model = BatchNormalization(momentum=0.15)(model)
+model = MaxPool2D(pool_size=(2, 2))(model)
+model = Conv2D(filters=32, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+model = Dropout(rate=0.3)(model)
+
+model = Conv2D(filters=64, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
+model = Conv2D(filters=64, kernel_size=(4, 4), padding='SAME', activation='relu')(model)
+model = BatchNormalization(momentum=0.15)(model)
+model = MaxPool2D(pool_size=(2, 2))(model)
+model = Conv2D(filters=64, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+model = BatchNormalization(momentum=0.15)(model)
+model = Dropout(rate=0.3)(model)
+
+model = Conv2D(filters=128, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
+model = Conv2D(filters=128, kernel_size=(4, 4), padding='SAME', activation='relu')(model)
+model = BatchNormalization(momentum=0.15)(model)
+model = MaxPool2D(pool_size=(2, 2))(model)
+model = Conv2D(filters=128, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+model = BatchNormalization(momentum=0.15)(model)
+model = Dropout(rate=0.3)(model)
+
+model = Conv2D(filters=256, kernel_size=(6, 6), padding='SAME', activation='relu')(model)
+model = Conv2D(filters=256, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
+model = Conv2D(filters=256, kernel_size=(3, 3), padding='SAME', activation='relu')(model)
+model = BatchNormalization(momentum=0.15)(model)
+model = MaxPool2D(pool_size=(2, 2))(model)
+model = Conv2D(filters=256, kernel_size=(5, 5), padding='SAME', activation='relu')(model)
+model = BatchNormalization(momentum=0.15)(model)
+model = Dropout(rate=0.3)(model)
+
+model = Flatten()(model)
+model = Dense(1024, activation = "relu")(model)
+model = Dropout(rate=0.3)(model)
+dense = Dense(512, activation = "relu")(model)
+
+head_root = Dense(168, activation = 'softmax',name="grapheme_root")(dense)
+head_vowel = Dense(11, activation = 'softmax',name='vowel_diacritic')(dense)
+head_consonant = Dense(7, activation = 'softmax',name='consonant_diacritic')(dense)
+
+model = Model(inputs=inputs, outputs=[head_root, head_vowel, head_consonant])
 model.compile(optimizer="adam",loss="categorical_crossentropy",metrics=["accuracy"])
+
+
+
+labels = pd.read_csv("./train.csv")
+
+grapheme_root_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
+vowel_diacritic_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
+consonant_diacritic_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
+
+grapheme_root_ohe.fit(labels[['grapheme_root']])
+vowel_diacritic_ohe.fit(labels[['vowel_diacritic']])
+consonant_diacritic_ohe.fit(labels[['consonant_diacritic']])
+
+EPOCHS=10
 
 for epoch in range(EPOCHS):
     for file_id in range(4):
-        X = pd.read_parquet(f"./train_image_data_{file_id}.parquet")
-        Y = train_grapheme.loc[X.pop("image_id")]
+        df = pd.read_parquet("./train_image_data_0.parquet")
+        df = pd.merge(df,labels,on='image_id')
+        model.fit_generator(input_flow(df),steps_per_epoch=df.shape[0],)
 
-        for index in tqdm(range(BATCH_SIZE,X.shape[0],BATCH_SIZE)):
-            X_ = X[index - BATCH_SIZE:index].values.reshape(TRAIN_SHAPE)
-            Y_ = Y[index - BATCH_SIZE:index]
-            model.fit(X_,Y_,batch_size=BATCH_SIZE,verbose=False)
-
-        X_ = X[index:].values.reshape(TRAIN_SHAPE)
-        Y_ = Y[index:]
-        model.fit(X_,Y_)
 
 notify.success()
 
