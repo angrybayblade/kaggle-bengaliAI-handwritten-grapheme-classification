@@ -26,9 +26,6 @@ from tensorflow.keras.models import Model
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
 
-from tqdm import tqdm_notebook
-from notifyme import notify
-
 
 PATH = os.getcwd()
 CROP = True if "--crop" in sys.argv else False
