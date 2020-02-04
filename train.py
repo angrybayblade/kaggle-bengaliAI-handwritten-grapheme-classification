@@ -1,94 +1,53 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# In[23]:
+
+
 from warnings import filterwarnings
-from tqdm import tqdm
-import logging
-import os
-
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
-
-try:
-    from notifyme import notify
-except:
-    pass
-
 filterwarnings("ignore")
-
-import sys
-import os
 
 import pandas as pd
 import numpy as np
+#import matplotlib.pyplot as plt
 import cv2 as cv
+
+#get_ipython().run_line_magic('matplotlib', 'inline')
 
 from tensorflow.keras import Sequential
 from tensorflow.keras.layers import *
 from tensorflow.keras.models import Model
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import ModelCheckpoint
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
 
 
-PATH = os.getcwd()
-CROP = True if "--crop" in sys.argv else False
-RESIZE = True if "--resize" in sys.argv else False
 
-SHAPE = (137,236)
-SHAPE_NEW = 48
+#from tqdm import tqdm_notebook
+from notifyme import notify
+from gc import collect
+from time import time,sleep
+from os import path
+from json import dumps
 
-class LabelEncoder():
-    def __init__(self,):
-        self._classes = []
+labels = pd.read_csv("./train.csv")
 
-    def fit(self,labels):
-        self._classes = list(set(labels))
+grapheme_root_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
+vowel_diacritic_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
+consonant_diacritic_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
 
-    def transform(self,labels):
-        return np.fromiter(map(self._classes.index,labels),dtype=np.int)
-
-def save_score(y,y_pred):
-    scores = dict(
-        accuracy = accuracy_score(y,y_pred),
-        precision = precision_score(y,y_pred),
-        recall = recall_score(y,y_pred),
-    )
-    print (scores)
-    json.dump(open("./score.json","w+"),scores)
+grapheme_root_ohe.fit(labels[['grapheme_root']])
+vowel_diacritic_ohe.fit(labels[['vowel_diacritic']])
+consonant_diacritic_ohe.fit(labels[['consonant_diacritic']])
 
 
+# In[7]:
 
-def crop(img,pad=True):
-    W_THRESH = 8
-    H_THRESH = 8
-    PAD = 3 if pad else 0
 
-    W_MIN,W_MAX = np.where(img.std(axis=0) > W_THRESH)[0][[0,-1]]
-    H_MIN,H_MAX = np.where(img.std(axis=1) > H_THRESH)[0][[0,-1]]
-    
-    return np.pad(img[H_MIN:H_MAX,W_MIN:W_MAX],PAD,constant_values=253)
-
-def resize(img,shape_=SHAPE_NEW,crop_=True,inv_=True):
-    
-    if crop_:
-        img = crop(img.reshape(SHAPE).astype(np.uint8))
-    if inv_:
-        ret,img = cv.threshold(img,110,255,cv.THRESH_BINARY_INV)
-        
-    return cv.resize(img,(shape_,shape_)).astype(np.uint8)
-
-def input_flow(X,sharpen=1):
-    for i in range(X.shape[0]):
-        row = X.iloc[i].values
-        yield ({
-                'input':resize(row[1:-4]).reshape(1,SHAPE_NEW,SHAPE_NEW,1)/255
-            },
-            {
-                'grapheme_root':grapheme_root_ohe.transform([row[-4:-3]]),
-                'vowel_diacritic':vowel_diacritic_ohe.transform([row[-3:-2]]),
-                'consonant_diacritic':consonant_diacritic_ohe.transform([row[-2:-1]])
-            }
-        )
-
-inputs = Input(shape = (SHAPE_NEW, SHAPE_NEW, 1),name="input")
-model = Conv2D(filters=32, kernel_size=(4, 4), padding='SAME', activation='relu', input_shape=(SHAPE_NEW, SHAPE_NEW, 1))(inputs)
+inputs = Input(shape = (64, 64, 1),name="inputs")
+model = Conv2D(filters=32, kernel_size=(4, 4), padding='SAME', activation='relu', input_shape=(64, 64, 1))(inputs)
 model = Conv2D(filters=32, kernel_size=(4, 4), padding='SAME', activation='relu')(model)
 model = BatchNormalization(momentum=0.15)(model)
 model = MaxPool2D(pool_size=(2, 2))(model)
@@ -130,32 +89,97 @@ head_vowel = Dense(11, activation = 'softmax',name='vowel_diacritic')(dense)
 head_consonant = Dense(7, activation = 'softmax',name='consonant_diacritic')(dense)
 
 model = Model(inputs=inputs, outputs=[head_root, head_vowel, head_consonant])
-model.compile(optimizer="adam",loss="categorical_crossentropy",metrics=["accuracy"])
+
+
+# In[8]:
+
+
+model.compile(optimizer="adam",loss='categorical_crossentropy',metrics=['accuracy'])
+
+
+# In[9]:
+
+
+def crop(img,pad=True):
+    W_THRESH = 8
+    H_THRESH = 8
+    PAD = 3 if pad else 0
+
+    W_MIN,W_MAX = np.where(img.std(axis=0) > W_THRESH)[0][[0,-1]]
+    H_MIN,H_MAX = np.where(img.std(axis=1) > H_THRESH)[0][[0,-1]]
+    
+    return np.pad(img[H_MIN:H_MAX,W_MIN:W_MAX],PAD,constant_values=253)
+
+def resize(img):
+    img = crop(img.reshape(137,236).astype(np.uint8))
+    ret,img = cv.threshold(img,110,255,cv.THRESH_BINARY_INV)    
+    return cv.resize(img,(64,64)).astype(np.uint8).reshape(64,64,1)
+
+def input_flow(x,y,batch_size=200):
+    for i in range(batch_size,x.shape[0],batch_size):
+        rows = x.iloc[i-batch_size:i].values
+        yield (
+                {
+                    "inputs":np.apply_along_axis(resize,axis=1,arr=rows)/255
+                },
+                {
+                    "grapheme_root":y[0][i-batch_size:i],
+                    'vowel_diacritic':y[1][i-batch_size:i],
+                    'consonant_diacritic':y[2][i-batch_size:i]
+                }
+            )
+
+
+# In[21]:
+
+
+def get_train_test(file_id):
+    df = pd.merge(
+            pd.read_parquet(f"./train_image_data_{file_id}.parquet"),
+            labels,
+            on='image_id'
+        )
+    
+    grapheme_root = grapheme_root_ohe.transform(df.grapheme_root.reshape(-1,1))
+    vowel_diacritic = vowel_diacritic_ohe.transform(df.vowel_diacritic.reshape(-1,1))
+    consonant_diacritic = consonant_diacritic_ohe.transform(df.consonant_diacritic.reshape(-1,1))
+    
+    df = df.drop(columns=['image_id','grapheme_root','vowel_diacritic','consonant_diacritic','grapheme'])
+    
+    return df,(grapheme_root,vowel_diacritic,consonant_diacritic)
 
 
 
-labels = pd.read_csv("./train.csv")
+# In[31]:
 
-grapheme_root_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
-vowel_diacritic_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
-consonant_diacritic_ohe = OneHotEncoder(dtype=np.uint16,sparse=False)
+checkpoint_path = ".keras_checkpoints/chek.ckpt"
+checkpoint_dir = path.dirname(checkpoint_path)
 
-grapheme_root_ohe.fit(labels[['grapheme_root']])
-vowel_diacritic_ohe.fit(labels[['vowel_diacritic']])
-consonant_diacritic_ohe.fit(labels[['consonant_diacritic']])
+cp_callback = ModelCheckpoint(filepath=checkpoint_path,
+                                                 save_weights_only=True,
+                                                 verbose=1)
+history  = []
 
-EPOCHS=10
+BATCH_SIZE = 500
+EPOCHS = 20
 
 for epoch in range(EPOCHS):
+    hist = None
     for file_id in range(4):
-        df = pd.read_parquet("./train_image_data_0.parquet")
-        df = pd.merge(df,labels,on='image_id')
-        model.fit_generator(input_flow(df),steps_per_epoch=df.shape[0],)
+        print (f"EPOCH : {epoch} | FILE : {file_id}")
+        X,Y = get_train_test(file_id)
+        gen = input_flow(X,Y,batch_size=BATCH_SIZE)
+        hist = model.fit_generator(gen,steps_per_epoch=X.shape[0]//BATCH_SIZE,callbacks=[cp_callback])
+        
+        del X,Y
+        collect()
+        sleep(10)
+        open("./log.txt","w+").write(f"EPOCH : {epoch} | FILE : {file_id}")
 
+    sleep(60)
+    history.append(hist.history) 
 
-notify.success()
+history = pd.DataFrame(history)
+history.to_csv("./history.csv")
+model.save_weights("./.weights/")
 
-for i in globals():
-    del globals()[i]
-
-exit()

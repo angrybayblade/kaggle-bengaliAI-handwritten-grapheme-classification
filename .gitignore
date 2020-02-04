@@ -1,3 +1,5 @@
 *.parquet
 *.csv
 .ipynb_checkpoints/*
+.keras_checkpoints/*
+.weights/
