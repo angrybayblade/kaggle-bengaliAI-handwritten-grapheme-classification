@@ -5,12 +5,14 @@
 
 
 from warnings import filterwarnings
+import sys
 filterwarnings("ignore")
 
 import pandas as pd
 import numpy as np
 #import matplotlib.pyplot as plt
 import cv2 as cv
+import tensorflow as tf
 
 #get_ipython().run_line_magic('matplotlib', 'inline')
 
@@ -24,13 +26,15 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder
 
 
-
 #from tqdm import tqdm_notebook
 from notifyme import notify
 from gc import collect
 from time import time,sleep
-from os import path
+from os import path,system
 from json import dumps
+
+HALT = True if '--halt' in sys.argv else False
+RESUME = True if '--resume' in sys.argv else False
 
 labels = pd.read_csv("./train.csv")
 
@@ -158,28 +162,38 @@ checkpoint_dir = path.dirname(checkpoint_path)
 cp_callback = ModelCheckpoint(filepath=checkpoint_path,
                                                  save_weights_only=True,
                                                  verbose=1)
-history  = []
 
 BATCH_SIZE = 500
 EPOCHS = 20
+START_EPOCH = 0
 
-for epoch in range(EPOCHS):
+if RESUME:
+    log = open("./log.txt",'r').read().split(" ")
+    START_EPOCH = int(log[2])
+
+    latest = tf.train.latest_checkpoint("./.keras_checkpoints")
+    model.load_weights(latest)
+
+for epoch in range(START_EPOCH,EPOCHS):
     hist = None
     for file_id in range(4):
         print (f"EPOCH : {epoch} | FILE : {file_id}")
         X,Y = get_train_test(file_id)
         gen = input_flow(X,Y,batch_size=BATCH_SIZE)
-        hist = model.fit_generator(gen,steps_per_epoch=X.shape[0]//BATCH_SIZE,callbacks=[cp_callback])
         
+        model.fit_generator(gen,steps_per_epoch=X.shape[0]//BATCH_SIZE)
+
         del X,Y
         collect()
-        sleep(10)
+        if HALT:
+            sleep(90)
+    
         open("./log.txt","w+").write(f"EPOCH : {epoch} | FILE : {file_id}")
 
-    sleep(60)
-    history.append(hist.history) 
-
-history = pd.DataFrame(history)
-history.to_csv("./history.csv")
+    
 model.save_weights("./.weights/")
 
+system("sudo shutdown 0")
+
+
+# %%
